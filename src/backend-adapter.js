@@ -33,6 +33,9 @@ function createAliyunClient(cfg) {
   const OSS = require('ali-oss');
   const regionMatch = cfg.region || cfg.endpoint.match(/oss-([a-z]+-[a-z]+-\d+)/);
   const region = typeof regionMatch === 'string' ? regionMatch : (regionMatch ? regionMatch[1] : 'cn-hangzhou');
+  if (!cfg.accessKeyId || !cfg.accessKeySecret) {
+    return null;
+  }
   return new OSS({
     region,
     accessKeyId: cfg.accessKeyId,
@@ -254,7 +257,16 @@ class AliyunAdapter {
     this.client = createAliyunClient(config);
   }
 
+  _ensureClient() {
+    if (!this.client) {
+      const err = new Error('Backend not configured: missing credentials');
+      err.statusCode = 503;
+      throw err;
+    }
+  }
+
   async execute(operation, params) {
+    this._ensureClient();
     switch (operation) {
       case S3_OPS.LIST_BUCKETS:
         return this.listBuckets();
@@ -428,6 +440,9 @@ class AliyunAdapter {
   }
 
   async checkHealth() {
+    if (!this.client) {
+      return { healthy: false, latency: 0, error: 'Backend not configured: missing credentials' };
+    }
     try {
       await this.client.listBuckets({ 'max-keys': 1 });
       return { healthy: true, latency: 0 };
