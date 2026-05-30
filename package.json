@@ -1,0 +1,20 @@
+{
+  "name": "oss-api",
+  "version": "1.0.0",
+  "description": "Multi-cloud object storage unified gateway with S3-compatible API",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "node --watch src/app.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/s3-request-presigner": "^3.600.0",
+    "@aws-sdk/middleware-endpoint": "^3.374.0",
+    "ali-oss": "^6.20.0",
+    "express": "^4.19.2",
+    "xml2js": "^0.6.2",
+    "uuid": "^9.0.1",
+    "morgan": "^1.10.0"
+  }
+}
