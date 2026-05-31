@@ -1,16 +1,21 @@
 const express = require('express');
 const morgan = require('morgan');
-const { GATEWAY_PORT } = require('./config');
-const { S3_OPS, parseRequest, formatListBucketsResult, formatListObjectsResult, formatCopyObjectResult, formatMultiDeleteResult, parseXmlBody } = require('./s3-parser');
+const { GATEWAY_PORT, CRR } = require('./config');
+const { S3_OPS, parseRequest, formatListBucketsResult, formatListObjectsResult, formatCopyObjectResult, formatMultiDeleteResult, parseXmlBody, formatInitiateMultipartUploadResult, formatCompleteMultipartUploadResult, formatListPartsResult, parseCompleteMultipartUploadBody } = require('./s3-parser');
 const { getOrCreateAdapter } = require('./backend-adapter');
 const PolicyRouter = require('./policy-router');
 const HealthChecker = require('./health-check');
 const ReplayMiddleware = require('./replay-middleware');
+const { ReplicationStore, REPLICATION_STATUS } = require('./crr-store');
+const ReplicationWorker = require('./replication-worker');
 
 const app = express();
 const healthChecker = new HealthChecker();
 const policyRouter = new PolicyRouter(healthChecker);
 const replayMiddleware = new ReplayMiddleware(policyRouter, healthChecker);
+const crrStore = new ReplicationStore(CRR);
+const crrRules = policyRouter.getCRRRules();
+const replicationWorker = new ReplicationWorker(crrRules, crrStore, healthChecker);
 
 express.response.xml = function (xml) {
   this.set('Content-Type', 'application/xml');
@@ -18,7 +23,8 @@ express.response.xml = function (xml) {
 };
 
 app.use(morgan('combined'));
-app.use(express.raw({ type: '*/*', limit: '100mb' }));
+app.use(express.json());
+app.use(express.raw({ type: (req) => !req.is('json'), limit: '100mb' }));
 
 healthChecker.onStatusChange((name, wasHealthy, isHealthy) => {
   const ts = new Date().toISOString();
@@ -27,6 +33,10 @@ healthChecker.onStatusChange((name, wasHealthy, isHealthy) => {
   } else {
     console.log(`[${ts}] Backend "${name}" recovered to HEALTHY`);
   }
+});
+
+replicationWorker.onReplicationComplete((job) => {
+  console.log(`[CRR] Replicated: ${job.sourceBucket}/${job.sourceKey} -> ${job.destinationBackend}:${job.destinationBucket}/${job.destinationKey}`);
 });
 
 app.get('/_/health', (req, res) => {
@@ -39,14 +49,17 @@ app.get('/_/health', (req, res) => {
 });
 
 app.get('/_/stats', (req, res) => {
-  res.json(replayMiddleware.getStats());
+  res.json({
+    gateway: replayMiddleware.getStats(),
+    crr: replicationWorker.getStats(),
+  });
 });
 
 app.get('/_/policies', (req, res) => {
   res.json(policyRouter.listPolicies());
 });
 
-app.put('/_/policies/:bucket', express.json(), (req, res) => {
+app.put('/_/policies/:bucket', (req, res) => {
   const { bucket } = req.params;
   const { primary, failover } = req.body;
   if (!primary) {
@@ -62,6 +75,99 @@ app.delete('/_/policies/:bucket', (req, res) => {
   res.status(204).send();
 });
 
+app.get('/_/crr/rules', (req, res) => {
+  const { sourceBucket, destinationBackend, enabled } = req.query;
+  const filters = {};
+  if (sourceBucket) filters.sourceBucket = sourceBucket;
+  if (destinationBackend) filters.destinationBackend = destinationBackend;
+  if (enabled !== undefined) filters.enabled = enabled === 'true';
+  res.json(crrRules.listRules(filters));
+});
+
+app.get('/_/crr/rules/:id', (req, res) => {
+  const rule = crrRules.getRule(req.params.id);
+  if (!rule) {
+    return res.status(404).json({ error: 'Rule not found' });
+  }
+  res.json(rule);
+});
+
+app.post('/_/crr/rules', (req, res) => {
+  try {
+    const rule = crrRules.createRule(req.body);
+    res.status(201).json(rule);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/_/crr/rules/:id', (req, res) => {
+  const rule = crrRules.updateRule(req.params.id, req.body);
+  if (!rule) {
+    return res.status(404).json({ error: 'Rule not found' });
+  }
+  res.json(rule);
+});
+
+app.delete('/_/crr/rules/:id', (req, res) => {
+  const deleted = crrRules.deleteRule(req.params.id);
+  if (!deleted) {
+    return res.status(404).json({ error: 'Rule not found' });
+  }
+  res.status(204).send();
+});
+
+app.post('/_/crr/rules/:id/enable', (req, res) => {
+  const rule = crrRules.enableRule(req.params.id);
+  if (!rule) {
+    return res.status(404).json({ error: 'Rule not found' });
+  }
+  res.json(rule);
+});
+
+app.post('/_/crr/rules/:id/disable', (req, res) => {
+  const rule = crrRules.disableRule(req.params.id);
+  if (!rule) {
+    return res.status(404).json({ error: 'Rule not found' });
+  }
+  res.json(rule);
+});
+
+app.get('/_/crr/jobs', (req, res) => {
+  const { status, sourceBucket, ruleId, limit, offset } = req.query;
+  const filters = {};
+  if (status) filters.status = status;
+  if (sourceBucket) filters.sourceBucket = sourceBucket;
+  if (ruleId) filters.ruleId = ruleId;
+  const jobs = crrStore.listJobs(
+    filters,
+    parseInt(limit || '100', 10),
+    parseInt(offset || '0', 10)
+  );
+  res.json({
+    total: crrStore.getStats().total,
+    jobs,
+  });
+});
+
+app.get('/_/crr/jobs/:id', (req, res) => {
+  const job = crrStore.getJob(req.params.id);
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+  res.json(job);
+});
+
+app.get('/_/crr/stats', (req, res) => {
+  res.json({
+    store: crrStore.getStats(),
+    rules: crrRules.getStats(),
+    worker: {
+      isRunning: replicationWorker.isRunning,
+    },
+  });
+});
+
 function buildExecuteParams(parsed) {
   const params = {
     bucket: parsed.bucket,
@@ -70,13 +176,31 @@ function buildExecuteParams(parsed) {
     contentType: parsed.contentType,
     metadata: parsed.metadata,
     copySource: parsed.copySource,
+    uploadId: parsed.uploadId,
+    partNumber: parsed.partNumber,
   };
 
-  if (parsed.operation === S3_OPS.PUT_OBJECT) {
+  if (parsed.operation === S3_OPS.PUT_OBJECT || parsed.operation === S3_OPS.UPLOAD_PART) {
     params.body = parsed.body;
   }
 
   return params;
+}
+
+const WRITE_TRIGGER_OPS = new Set([
+  S3_OPS.PUT_OBJECT,
+  S3_OPS.COPY_OBJECT,
+  S3_OPS.COMPLETE_MULTIPART_UPLOAD,
+]);
+
+function triggerReplication(parsed, result, backendName) {
+  if (!CRR.enabled) return [];
+  if (!WRITE_TRIGGER_OPS.has(parsed.operation)) return [];
+
+  const { bucket, key } = parsed;
+  const etag = result.etag || result.sourceEtag || null;
+
+  return replicationWorker.queueReplication(bucket, key, backendName, etag);
 }
 
 app.all('/*', async (req, res) => {
@@ -87,7 +211,10 @@ app.all('/*', async (req, res) => {
   }
 
   try {
+    let usedBackendName = null;
+
     const result = await replayMiddleware.executeWithFailover(parsed, async (backend) => {
+      usedBackendName = backend.name;
       const params = buildExecuteParams(parsed);
       if (parsed.operation === S3_OPS.MULTI_DELETE && !params.keys) {
         const xmlBody = await parseXmlBody(parsed.body?.toString() || '');
@@ -98,8 +225,16 @@ app.all('/*', async (req, res) => {
           params.keys = [];
         }
       }
+      if (parsed.operation === S3_OPS.COMPLETE_MULTIPART_UPLOAD && !params.parts) {
+        const parsedBody = await parseCompleteMultipartUploadBody(parsed.body?.toString() || '');
+        params.parts = parsedBody.parts;
+      }
       return backend.adapter.execute(parsed.operation, params);
     });
+
+    if (usedBackendName) {
+      triggerReplication(parsed, result, usedBackendName);
+    }
 
     sendResult(res, parsed, result);
   } catch (err) {
@@ -177,6 +312,30 @@ function sendResult(res, parsed, result) {
       res.send(formatMultiDeleteResult(result.deleted || [], result.errors || []));
       break;
 
+    case S3_OPS.CREATE_MULTIPART_UPLOAD:
+      res.set('Content-Type', 'application/xml');
+      res.send(formatInitiateMultipartUploadResult(result.bucket, result.key, result.uploadId));
+      break;
+
+    case S3_OPS.UPLOAD_PART:
+      res.set('ETag', result.etag || '""');
+      res.status(200).send();
+      break;
+
+    case S3_OPS.COMPLETE_MULTIPART_UPLOAD:
+      res.set('Content-Type', 'application/xml');
+      res.send(formatCompleteMultipartUploadResult(result.bucket, result.key, result.etag, result.location));
+      break;
+
+    case S3_OPS.ABORT_MULTIPART_UPLOAD:
+      res.status(204).send();
+      break;
+
+    case S3_OPS.LIST_PARTS:
+      res.set('Content-Type', 'application/xml');
+      res.send(formatListPartsResult(result.bucket, result.key, result.uploadId, result.parts, result.isTruncated));
+      break;
+
     default:
       res.status(400).xml(buildErrorXml('InvalidRequest', 'Unknown operation'));
   }
@@ -197,23 +356,29 @@ function escapeXml(str) {
 
 function start() {
   healthChecker.start();
+  replicationWorker.start();
 
   const server = app.listen(GATEWAY_PORT, () => {
     console.log(`OSS Gateway listening on port ${GATEWAY_PORT}`);
     console.log(`Health check: http://localhost:${GATEWAY_PORT}/_/health`);
     console.log(`Stats:        http://localhost:${GATEWAY_PORT}/_/stats`);
     console.log(`Policies:     http://localhost:${GATEWAY_PORT}/_/policies`);
+    console.log(`CRR Rules:    http://localhost:${GATEWAY_PORT}/_/crr/rules`);
+    console.log(`CRR Jobs:     http://localhost:${GATEWAY_PORT}/_/crr/jobs`);
+    console.log(`CRR Stats:    http://localhost:${GATEWAY_PORT}/_/crr/stats`);
   });
 
   process.on('SIGTERM', () => {
     console.log('Shutting down...');
     healthChecker.stop();
+    replicationWorker.stop();
     server.close(() => process.exit(0));
   });
 
   process.on('SIGINT', () => {
     console.log('Shutting down...');
     healthChecker.stop();
+    replicationWorker.stop();
     server.close(() => process.exit(0));
   });
 
@@ -224,4 +389,4 @@ if (require.main === module) {
   start();
 }
 
-module.exports = { app, start, healthChecker, policyRouter, replayMiddleware };
+module.exports = { app, start, healthChecker, policyRouter, replayMiddleware, crrStore, crrRules, replicationWorker };

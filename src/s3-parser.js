@@ -12,6 +12,11 @@ const S3_OPS = {
   DELETE_OBJECT: 'DeleteObject',
   COPY_OBJECT: 'CopyObject',
   MULTI_DELETE: 'MultiDelete',
+  CREATE_MULTIPART_UPLOAD: 'CreateMultipartUpload',
+  UPLOAD_PART: 'UploadPart',
+  COMPLETE_MULTIPART_UPLOAD: 'CompleteMultipartUpload',
+  ABORT_MULTIPART_UPLOAD: 'AbortMultipartUpload',
+  LIST_PARTS: 'ListParts',
   UNKNOWN: 'Unknown',
 };
 
@@ -53,6 +58,8 @@ function parseRequest(req) {
     contentType: req.headers['content-type'] || 'application/octet-stream',
     metadata: extractMetadata(req.headers),
     copySource: req.headers['x-amz-copy-source'] || null,
+    uploadId: query.uploadId || null,
+    partNumber: query.partNumber ? parseInt(query.partNumber, 10) : null,
   };
 }
 
@@ -74,6 +81,25 @@ function detectOperation(method, bucket, key, query, headers) {
         return S3_OPS.LIST_OBJECTS_V2;
       default:
         return S3_OPS.UNKNOWN;
+    }
+  }
+
+  if (query.uploads !== undefined && method === 'POST') {
+    return S3_OPS.CREATE_MULTIPART_UPLOAD;
+  }
+
+  if (query.uploadId !== undefined) {
+    if (method === 'PUT' && query.partNumber !== undefined) {
+      return S3_OPS.UPLOAD_PART;
+    }
+    if (method === 'POST') {
+      return S3_OPS.COMPLETE_MULTIPART_UPLOAD;
+    }
+    if (method === 'DELETE') {
+      return S3_OPS.ABORT_MULTIPART_UPLOAD;
+    }
+    if (method === 'GET') {
+      return S3_OPS.LIST_PARTS;
     }
   }
 
@@ -178,6 +204,58 @@ function formatMultiDeleteResult(deleted, errors) {
   return buildXml('DeleteResult', result);
 }
 
+function formatInitiateMultipartUploadResult(bucket, key, uploadId) {
+  return buildXml('InitiateMultipartUploadResult', {
+    Bucket: bucket,
+    Key: key,
+    UploadId: uploadId,
+  });
+}
+
+function formatCompleteMultipartUploadResult(bucket, key, etag, location) {
+  return buildXml('CompleteMultipartUploadResult', {
+    Location: location || `/${bucket}/${key}`,
+    Bucket: bucket,
+    Key: key,
+    ETag: etag,
+  });
+}
+
+function formatListPartsResult(bucket, key, uploadId, parts, isTruncated) {
+  const result = {
+    Bucket: bucket,
+    Key: key,
+    UploadId: uploadId,
+    IsTruncated: isTruncated ? 'true' : 'false',
+  };
+  if (parts && parts.length > 0) {
+    result.Part = parts.map((p) => ({
+      PartNumber: p.partNumber,
+      LastModified: p.lastModified || new Date().toISOString(),
+      ETag: p.etag,
+      Size: String(p.size || 0),
+    }));
+  }
+  return buildXml('ListPartsResult', result);
+}
+
+async function parseCompleteMultipartUploadBody(xml) {
+  const parsed = await parseXmlBody(xml, { explicitArray: false });
+  if (!parsed || !parsed.CompleteMultipartUpload || !parsed.CompleteMultipartUpload.Part) {
+    return { parts: [] };
+  }
+  let parts = parsed.CompleteMultipartUpload.Part;
+  if (!Array.isArray(parts)) {
+    parts = [parts];
+  }
+  return {
+    parts: parts.map((p) => ({
+      partNumber: parseInt(p.PartNumber, 10),
+      etag: p.ETag,
+    })),
+  };
+}
+
 module.exports = {
   S3_OPS,
   parseRequest,
@@ -189,4 +267,8 @@ module.exports = {
   formatListObjectsResult,
   formatCopyObjectResult,
   formatMultiDeleteResult,
+  formatInitiateMultipartUploadResult,
+  formatCompleteMultipartUploadResult,
+  formatListPartsResult,
+  parseCompleteMultipartUploadBody,
 };

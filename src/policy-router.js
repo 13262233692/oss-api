@@ -1,10 +1,12 @@
 const { BUCKET_POLICIES, DEFAULT_POLICY, BACKENDS } = require('./config');
 const { getOrCreateAdapter } = require('./backend-adapter');
+const CRRRulesEngine = require('./crr-rules');
 
 class PolicyRouter {
   constructor(healthChecker) {
     this.healthChecker = healthChecker;
     this.policies = { ...BUCKET_POLICIES };
+    this.crrRules = new CRRRulesEngine();
   }
 
   setPolicy(bucket, policy) {
@@ -86,6 +88,42 @@ class PolicyRouter {
       failover: policy.failover,
       replication: policy.replication,
     }));
+  }
+
+  getCRRRules() {
+    return this.crrRules;
+  }
+
+  matchReplicationRules(bucket, key) {
+    return this.crrRules.matchRules(bucket, key);
+  }
+
+  hasReplication(bucket, key) {
+    return this.crrRules.shouldReplicate(bucket, key);
+  }
+
+  getReplicationDestinations(bucket, key) {
+    return this.crrRules.getReplicationDestinations(bucket, key);
+  }
+
+  createCRRRule(ruleData) {
+    return this.crrRules.createRule(ruleData);
+  }
+
+  updateCRRRule(id, updates) {
+    return this.crrRules.updateRule(id, updates);
+  }
+
+  deleteCRRRule(id) {
+    return this.crrRules.deleteRule(id);
+  }
+
+  getCRRRule(id) {
+    return this.crrRules.getRule(id);
+  }
+
+  listCRRRules(filters) {
+    return this.crrRules.listRules(filters);
   }
 }
 

@@ -7,6 +7,7 @@ const READ_OPS = new Set([
   S3_OPS.LIST_OBJECTS_V2,
   S3_OPS.GET_OBJECT,
   S3_OPS.HEAD_OBJECT,
+  S3_OPS.LIST_PARTS,
 ]);
 
 const WRITE_OPS = new Set([
@@ -16,6 +17,10 @@ const WRITE_OPS = new Set([
   S3_OPS.DELETE_OBJECT,
   S3_OPS.COPY_OBJECT,
   S3_OPS.MULTI_DELETE,
+  S3_OPS.CREATE_MULTIPART_UPLOAD,
+  S3_OPS.UPLOAD_PART,
+  S3_OPS.COMPLETE_MULTIPART_UPLOAD,
+  S3_OPS.ABORT_MULTIPART_UPLOAD,
 ]);
 
 class ReplayMiddleware {
@@ -57,6 +62,8 @@ class ReplayMiddleware {
     if (operation === S3_OPS.DELETE_OBJECT) return true;
     if (operation === S3_OPS.MULTI_DELETE) return true;
     if (operation === S3_OPS.DELETE_BUCKET) return true;
+    if (operation === S3_OPS.UPLOAD_PART) return true;
+    if (operation === S3_OPS.ABORT_MULTIPART_UPLOAD) return true;
     return false;
   }
 

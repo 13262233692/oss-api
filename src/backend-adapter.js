@@ -11,6 +11,11 @@ const {
   DeleteObjectCommand,
   CopyObjectCommand,
   DeleteObjectsCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
+  ListPartsCommand,
 } = require('@aws-sdk/client-s3');
 const { S3_OPS } = require('./s3-parser');
 
@@ -100,6 +105,16 @@ class S3Adapter {
         return this.copyObject(params.bucket, params.key, params.copySource);
       case S3_OPS.MULTI_DELETE:
         return this.multiDelete(params.bucket, params.keys);
+      case S3_OPS.CREATE_MULTIPART_UPLOAD:
+        return this.createMultipartUpload(params.bucket, params.key, params.contentType, params.metadata);
+      case S3_OPS.UPLOAD_PART:
+        return this.uploadPart(params.bucket, params.key, params.uploadId, params.partNumber, params.body);
+      case S3_OPS.COMPLETE_MULTIPART_UPLOAD:
+        return this.completeMultipartUpload(params.bucket, params.key, params.uploadId, params.parts);
+      case S3_OPS.ABORT_MULTIPART_UPLOAD:
+        return this.abortMultipartUpload(params.bucket, params.key, params.uploadId);
+      case S3_OPS.LIST_PARTS:
+        return this.listParts(params.bucket, params.key, params.uploadId);
       default:
         throw new Error(`Unsupported operation: ${operation}`);
     }
@@ -239,6 +254,99 @@ class S3Adapter {
     return { statusCode: 200, deleted, errors };
   }
 
+  async createMultipartUpload(bucket, key, contentType, metadata) {
+    const input = {
+      Bucket: bucket,
+      Key: key,
+      ContentType: contentType || 'application/octet-stream',
+    };
+    if (metadata && Object.keys(metadata).length > 0) {
+      input.Metadata = metadata;
+    }
+    const result = await this.client.send(new CreateMultipartUploadCommand(input));
+    return {
+      statusCode: 200,
+      uploadId: result.UploadId,
+      bucket: result.Bucket,
+      key: result.Key,
+    };
+  }
+
+  async uploadPart(bucket, key, uploadId, partNumber, body) {
+    const result = await this.client.send(
+      new UploadPartCommand({
+        Bucket: bucket,
+        Key: key,
+        UploadId: uploadId,
+        PartNumber: partNumber,
+        Body: body,
+      })
+    );
+    return {
+      statusCode: 200,
+      etag: result.ETag,
+      partNumber,
+    };
+  }
+
+  async completeMultipartUpload(bucket, key, uploadId, parts) {
+    const sortedParts = [...parts].sort((a, b) => a.partNumber - b.partNumber);
+    const result = await this.client.send(
+      new CompleteMultipartUploadCommand({
+        Bucket: bucket,
+        Key: key,
+        UploadId: uploadId,
+        MultipartUpload: {
+          Parts: sortedParts.map((p) => ({
+            PartNumber: p.partNumber,
+            ETag: p.etag,
+          })),
+        },
+      })
+    );
+    return {
+      statusCode: 200,
+      bucket: result.Bucket,
+      key: result.Key,
+      etag: result.ETag,
+      location: result.Location,
+    };
+  }
+
+  async abortMultipartUpload(bucket, key, uploadId) {
+    await this.client.send(
+      new AbortMultipartUploadCommand({
+        Bucket: bucket,
+        Key: key,
+        UploadId: uploadId,
+      })
+    );
+    return { statusCode: 204 };
+  }
+
+  async listParts(bucket, key, uploadId) {
+    const result = await this.client.send(
+      new ListPartsCommand({
+        Bucket: bucket,
+        Key: key,
+        UploadId: uploadId,
+      })
+    );
+    return {
+      statusCode: 200,
+      bucket: result.Bucket,
+      key: result.Key,
+      uploadId: result.UploadId,
+      parts: (result.Parts || []).map((p) => ({
+        partNumber: p.PartNumber,
+        lastModified: p.LastModified?.toISOString(),
+        etag: p.ETag,
+        size: p.Size,
+      })),
+      isTruncated: result.IsTruncated || false,
+    };
+  }
+
   async checkHealth() {
     try {
       await this.client.send(new ListBucketsCommand({}));
@@ -290,6 +398,16 @@ class AliyunAdapter {
         return this.copyObject(params.bucket, params.key, params.copySource);
       case S3_OPS.MULTI_DELETE:
         return this.multiDelete(params.bucket, params.keys);
+      case S3_OPS.CREATE_MULTIPART_UPLOAD:
+        return this.createMultipartUpload(params.bucket, params.key, params.contentType, params.metadata);
+      case S3_OPS.UPLOAD_PART:
+        return this.uploadPart(params.bucket, params.key, params.uploadId, params.partNumber, params.body);
+      case S3_OPS.COMPLETE_MULTIPART_UPLOAD:
+        return this.completeMultipartUpload(params.bucket, params.key, params.uploadId, params.parts);
+      case S3_OPS.ABORT_MULTIPART_UPLOAD:
+        return this.abortMultipartUpload(params.bucket, params.key, params.uploadId);
+      case S3_OPS.LIST_PARTS:
+        return this.listParts(params.bucket, params.key, params.uploadId);
       default:
         throw new Error(`Unsupported operation: ${operation}`);
     }
@@ -434,6 +552,92 @@ class AliyunAdapter {
       const deleted = (result.deleted || []).map((d) => d.Key || d.name);
       const errors = [];
       return { statusCode: 200, deleted, errors };
+    } finally {
+      if (prev) this.client.useBucket(prev);
+    }
+  }
+
+  async createMultipartUpload(bucket, key, contentType, metadata) {
+    const prev = this.client.options.bucket;
+    this.client.useBucket(bucket);
+    try {
+      const opts = {};
+      if (contentType) opts.mime = contentType;
+      if (metadata) opts.meta = metadata;
+      const result = await this.client.initMultipartUpload(key, opts);
+      return {
+        statusCode: 200,
+        uploadId: result.uploadId,
+        bucket: result.bucket,
+        key: result.name,
+      };
+    } finally {
+      if (prev) this.client.useBucket(prev);
+    }
+  }
+
+  async uploadPart(bucket, key, uploadId, partNumber, body) {
+    const prev = this.client.options.bucket;
+    this.client.useBucket(bucket);
+    try {
+      const result = await this.client.uploadPart(key, uploadId, partNumber, body);
+      return {
+        statusCode: 200,
+        etag: result.etag,
+        partNumber,
+      };
+    } finally {
+      if (prev) this.client.useBucket(prev);
+    }
+  }
+
+  async completeMultipartUpload(bucket, key, uploadId, parts) {
+    const prev = this.client.options.bucket;
+    this.client.useBucket(bucket);
+    try {
+      const sortedParts = [...parts].sort((a, b) => a.partNumber - b.partNumber);
+      const result = await this.client.completeMultipartUpload(key, uploadId, sortedParts);
+      return {
+        statusCode: 200,
+        bucket: result.bucket,
+        key: result.name,
+        etag: result.etag,
+        location: result.res.requestUrls?.[0] || `/${bucket}/${key}`,
+      };
+    } finally {
+      if (prev) this.client.useBucket(prev);
+    }
+  }
+
+  async abortMultipartUpload(bucket, key, uploadId) {
+    const prev = this.client.options.bucket;
+    this.client.useBucket(bucket);
+    try {
+      await this.client.abortMultipartUpload(key, uploadId);
+      return { statusCode: 204 };
+    } finally {
+      if (prev) this.client.useBucket(prev);
+    }
+  }
+
+  async listParts(bucket, key, uploadId) {
+    const prev = this.client.options.bucket;
+    this.client.useBucket(bucket);
+    try {
+      const result = await this.client.listParts(key, uploadId);
+      return {
+        statusCode: 200,
+        bucket,
+        key,
+        uploadId,
+        parts: (result.parts || []).map((p) => ({
+          partNumber: p.number,
+          lastModified: p.lastModified,
+          etag: p.etag,
+          size: p.size,
+        })),
+        isTruncated: false,
+      };
     } finally {
       if (prev) this.client.useBucket(prev);
     }

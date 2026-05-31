@@ -72,6 +72,38 @@ const FAILOVER = {
   retryableStatusCodes: [503, 502, 504],
 };
 
+const CRR = {
+  enabled: true,
+  workerIntervalMs: 500,
+  maxConcurrent: 5,
+  maxRetries: 3,
+  retryDelayMs: 1000,
+  storage: {
+    type: 'sqlite',
+    path: './data/crr.db',
+  },
+  defaultRules: [
+    {
+      id: 'crr-prod-assets-to-minio',
+      sourceBucket: 'prod-assets',
+      sourcePrefix: '',
+      destinationBackend: 'minio',
+      destinationBucket: 'prod-assets-replica',
+      enabled: true,
+      priority: 1,
+    },
+    {
+      id: 'crr-user-uploads-to-aws',
+      sourceBucket: 'user-uploads',
+      sourcePrefix: 'images/',
+      destinationBackend: 'aws',
+      destinationBucket: 'user-uploads-replica',
+      enabled: true,
+      priority: 2,
+    },
+  ],
+};
+
 module.exports = {
   GATEWAY_PORT,
   BACKENDS,
@@ -79,4 +111,5 @@ module.exports = {
   DEFAULT_POLICY,
   HEALTH_CHECK,
   FAILOVER,
+  CRR,
 };
